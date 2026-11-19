@@ -2920,12 +2920,7 @@ export function convertMessages(
 			continue;
 		}
 
-		lastRole =
-			msg.role === "developer"
-				? model.reasoning && compat.supportsDeveloperRole
-					? "developer"
-					: "system"
-				: msg.role;
+		lastRole = msg.role === "developer" ? (compat.supportsDeveloperRole ? "developer" : "user") : msg.role;
 	}
 
 	return params;

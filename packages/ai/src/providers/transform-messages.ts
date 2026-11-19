@@ -11,6 +11,7 @@ import type {
 	KnownApi,
 	Message,
 	Model,
+	TextContent,
 	ToolCall,
 	ToolResultMessage,
 	UserMessage,
@@ -1607,5 +1608,78 @@ export function transformMessages<TApi extends Api>(
 	flushPendingToolCalls(Date.now());
 	flushPendingAbortedToolCalls();
 
-	return result;
+	return foldPostToolResultDeveloperNoticesForGemini(result, model);
+}
+
+function extractTextOnlyDeveloperNotice(msg: DeveloperMessage): string | undefined {
+	if (msg.attribution === "user" || msg.providerPayload !== undefined) return undefined;
+	if (typeof msg.content === "string") {
+		const trimmed = msg.content.trim();
+		return trimmed.length > 0 ? msg.content : undefined;
+	}
+	if (msg.content.length === 0) return undefined;
+	const parts: string[] = [];
+	for (const block of msg.content) {
+		if (block.type !== "text") return undefined;
+		if (block.text.trim().length > 0) parts.push(block.text);
+	}
+	return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function appendNoticeToToolResult(toolResult: ToolResultMessage, noticeText: string): ToolResultMessage {
+	const content = toolResult.content.slice();
+	let lastTextIndex = -1;
+	for (let i = content.length - 1; i >= 0; i--) {
+		if (content[i]?.type === "text") {
+			lastTextIndex = i;
+			break;
+		}
+	}
+	if (lastTextIndex >= 0) {
+		const prev = content[lastTextIndex] as TextContent;
+		const joined = prev.text.length > 0 ? `${prev.text}\n\n${noticeText}` : noticeText;
+		content[lastTextIndex] = { ...prev, text: joined };
+	} else {
+		content.push({ type: "text", text: noticeText });
+	}
+	return { ...toolResult, content };
+}
+
+/**
+ * Vertex / Gemini 3+ models frequently terminate long tool-calling sessions with
+ * an empty `MALFORMED_RESPONSE` when a harness-injected `developer` notice
+ * (`mid-run-todo-nudge`, `async-result`, `eval-state-context`, etc.) is emitted
+ * as a standalone `user` turn immediately after a `toolResult` (`functionResponse`),
+ * instead of keeping the turn ending on the `functionResponse` batch.
+ *
+ * Fold text-only, agent-attributed `developer` notices into the immediately
+ * preceding `toolResult` for Gemini-lineage targets across all transports
+ * (`openrouter` Responses/Completions, `google-vertex`, `google-generative-ai`,
+ * `google-gemini-cli`). User-attributed `developer` turns (such as `@file`
+ * mentions) and image-bearing messages remain separate turns.
+ */
+function foldPostToolResultDeveloperNoticesForGemini<TApi extends Api>(
+	messages: Message[],
+	model: Model<TApi>,
+): Message[] {
+	if (model.identity?.class !== "gemini") return messages;
+	let folded: Message[] | undefined;
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i]!;
+		if (msg.role === "developer") {
+			const prevList = folded ?? messages;
+			const prevIndex = folded ? folded.length - 1 : i - 1;
+			const prev = prevIndex >= 0 ? prevList[prevIndex] : undefined;
+			if (prev?.role === "toolResult") {
+				const noticeText = extractTextOnlyDeveloperNotice(msg);
+				if (noticeText !== undefined) {
+					if (!folded) folded = messages.slice(0, i);
+					folded[folded.length - 1] = appendNoticeToToolResult(prev, noticeText);
+					continue;
+				}
+			}
+		}
+		if (folded) folded.push(msg);
+	}
+	return folded ?? messages;
 }

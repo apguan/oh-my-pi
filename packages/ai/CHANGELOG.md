@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini tool-calling sessions failing with empty `MALFORMED_RESPONSE` errors on long contexts when mid-run reminders or background job notifications follow a tool result.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
